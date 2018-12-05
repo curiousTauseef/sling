@@ -37,7 +37,7 @@ cc_library(
     "//sling/file",
     "//sling/file:recordio",
     "//sling/frame",
-    "//sling/http:http-server",
+    "//sling/http",
     "//sling/myelin:flow",
     "//sling/myelin:compiler",
     "//sling/myelin:compute",

@@ -15,17 +15,15 @@
 #ifndef SLING_HTTP_HTTP_SERVER_H_
 #define SLING_HTTP_HTTP_SERVER_H_
 
-#include <netinet/in.h>
 #include <string.h>
 #include <time.h>
-#include <atomic>
 #include <string>
 
+#include "sling/base/registry.h"
 #include "sling/base/status.h"
 #include "sling/base/types.h"
 #include "sling/file/file.h"
 #include "sling/util/mutex.h"
-#include "sling/util/thread.h"
 
 using namespace std::placeholders;
 
@@ -121,6 +119,12 @@ struct HTTPHeader {
 
 // HTTP server configuration.
 struct HTTPServerOptions {
+  // HTTP server implementation.
+  string driver = "epoll";
+
+  // HTTP server port.
+  int port = 8080;
+
   // Number of worker threads.
   int num_workers = 5;
 
@@ -143,15 +147,17 @@ struct HTTPServerOptions {
   string server_name = "HTTPServer/1.0";
 };
 
-// HTTP server.
-class HTTPServer {
+// HTTP server base.
+class HTTPServer : public Component<HTTPServer> {
  public:
   // HTTP handler.
   typedef std::function<void(HTTPRequest *, HTTPResponse *)> Handler;
 
-  // Initialize HTTP server to listen on port.
-  HTTPServer(const HTTPServerOptions &options, int port);
-  ~HTTPServer();
+  HTTPServer();
+  virtual ~HTTPServer();
+
+  // Create new HTTP server.
+  static HTTPServer *New(const HTTPServerOptions &options);
 
   // Register handler for requests.
   void Register(const string &uri, const Handler &handler);
@@ -167,18 +173,18 @@ class HTTPServer {
   Handler FindHandler(HTTPRequest *request) const;
 
   // Start HTTP server listening on the port.
-  Status Start();
+  virtual Status Start() = 0;
 
   // Wait for shutdown.
-  void Wait();
+  virtual void Wait() = 0;
 
   // Shut down HTTP server.
-  void Shutdown();
+  virtual void Shutdown() = 0;
 
   // Configuration options.
   const HTTPServerOptions &options() const { return options_; }
 
- private:
+ protected:
   // HTTP context for serving requests under an URI.
   struct Context {
     Context(const string &u, const Handler &h) : uri(u), handler(h) {
@@ -188,23 +194,11 @@ class HTTPServer {
     Handler handler;
   };
 
-  // Worker handler.
-  void Worker();
-
-  // Accept new connection.
-  void AcceptConnection();
-
-  // Process I/O events for connection.
-  void Process(HTTPConnection *conn, int events);
-
   // Add connection to server.
   void AddConnection(HTTPConnection *conn);
 
   // Remove connection from server.
   void RemoveConnection(HTTPConnection *conn);
-
-  // Shut down idle connections.
-  void ShutdownIdleConnections();
 
   // Handler for /helpz.
   void HelpHandler(HTTPRequest *req, HTTPResponse *rsp);
@@ -215,15 +209,6 @@ class HTTPServer {
   // Server configuration.
   HTTPServerOptions options_;
 
-  // Port to listen on.
-  int port_;
-
-  // Socket for accepting new connections.
-  int sock_;
-
-  // File descriptor for epoll.
-  int pollfd_;
-
   // Mutex for serializing access to server state.
   mutable Mutex mu_;
 
@@ -231,27 +216,18 @@ class HTTPServer {
   std::vector<Context> contexts_;
 
   // List of active HTTP connections.
-  HTTPConnection *connections_;
-
-  // Worker threads.
-  WorkerPool workers_;
-
-  // Number of active worker threads.
-  std::atomic<int> active_{0};
-
-  // Number of idle worker threads.
-  std::atomic<int> idle_{0};
-
-  // Flag to determine if server is shutting down.
-  bool stop_;
+  HTTPConnection *connections_ = nullptr;
 };
+
+#define REGISTER_HTTP_SERVER(type, component) \
+    REGISTER_COMPONENT_TYPE(sling::HTTPServer, type, component)
 
 // HTTP connection.
 class HTTPConnection {
  public:
-  // Initialize new HTTP connection on socket.
-  HTTPConnection(HTTPServer *server, int sock);
-  ~HTTPConnection();
+  // Initialize new HTTP connection.
+  HTTPConnection(HTTPServer *server);
+  virtual ~HTTPConnection();
 
   // Process I/O for connection.
   Status Process();
@@ -261,9 +237,6 @@ class HTTPConnection {
 
   // Dispatch request to handler.
   void Dispatch();
-
-  // Reset connection to idle.
-  void Reset();
 
   // Return HTTP request information.
   HTTPRequest *request() const { return request_; }
@@ -287,26 +260,20 @@ class HTTPConnection {
   // Return connection state name.
   const char *State() const;
 
- private:
+ protected:
   // Receive data into buffer until it is full or all data that can be received
   // without blocking has been received.
-  Status Recv(HTTPBuffer *buffer, bool *done);
+  virtual Status Recv(HTTPBuffer *buffer, bool *done) = 0;
 
   // Send data from buffer until all data has been sent or all the data that can
   // be sent without blocking has been sent.
-  Status Send(HTTPBuffer *buffer, bool *done);
+  virtual Status Send(HTTPBuffer *buffer, bool *done) = 0;
 
   // Shut down connection.
-  void Shutdown();
+  virtual void Shutdown() = 0;
 
   // HTTP server for connection.
   HTTPServer *server_;
-
-  // Socket for connection.
-  int sock_;
-
-  // Last time event was received on connection.
-  time_t last_;
 
   // HTTP connection list.
   HTTPConnection *next_;

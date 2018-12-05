@@ -61,7 +61,7 @@ cc_binary(
     "//sling/file",
     "//sling/file:embed",
     "//sling/file:posix",
-    "//sling/http:http-server",
+    "//sling/http:http",
     "//sling/http:web-service",
     "//sling/string:text",
     "//sling/string:strcat",

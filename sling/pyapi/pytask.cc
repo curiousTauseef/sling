@@ -515,7 +515,8 @@ PyObject *PyStartTaskMonitor(PyObject *self, PyObject *args) {
   if (http == nullptr) {
     LOG(INFO) << "Start HTTP server in port " << port;
     HTTPServerOptions options;
-    http = new HTTPServer(options, port);
+    options.port = port;
+    http = HTTPServer::New(options);
     start_http_server = true;
   }
 

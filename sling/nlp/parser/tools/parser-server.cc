@@ -78,15 +78,17 @@ int main(int argc, char *argv[]) {
 
   LOG(INFO) << "Start HTTP server on port " << FLAGS_port;
   HTTPServerOptions options;
-  HTTPServer http(options, FLAGS_port);
+  options.port = FLAGS_port;
+  HTTPServer *http = HTTPServer::New(options);
 
   ParserService service;
   service.Init(FLAGS_parser);
-  service.Register(&http);
+  service.Register(http);
 
-  CHECK(http.Start());
+  CHECK(http->Start());
   LOG(INFO) << "HTTP server running";
-  http.Wait();
+  http->Wait();
+  delete http;
 
   return 0;
 }

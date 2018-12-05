@@ -1,6 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+  name = "http",
+  deps = [
+    ":http-server",
+    ":epoll-server",
+  ],
+)
+
+cc_library(
   name = "http-server",
   srcs = ["http-server.cc"],
   hdrs = ["http-server.h"],
@@ -10,8 +18,20 @@ cc_library(
     "//sling/string:ctype",
     "//sling/string:numbers",
     "//sling/util:mutex",
+  ],
+)
+
+cc_library(
+  name = "epoll-server",
+  srcs = ["epoll-server.cc"],
+  deps = [
+    ":http-server",
+    "//sling/base",
+    "//sling/string:numbers",
+    "//sling/util:mutex",
     "//sling/util:thread",
   ],
+  alwayslink = 1,
 )
 
 cc_library(

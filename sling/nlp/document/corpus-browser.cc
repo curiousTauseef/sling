@@ -189,12 +189,13 @@ int main(int argc, char *argv[]) {
 
   LOG(INFO) << "Start HTTP server on port " << FLAGS_port;
   HTTPServerOptions httpopts;
-  HTTPServer http(httpopts, FLAGS_port);
+  httpopts.port = FLAGS_port;
+  HTTPServer *http = HTTPServer::New(httpopts);
 
-  browser.Register(&http);
-  if (FLAGS_kb) kb.Register(&http);
+  browser.Register(http);
+  if (FLAGS_kb) kb.Register(http);
 
-  http.Register("/", [](HTTPRequest *req, HTTPResponse *rsp) {
+  http->Register("/", [](HTTPRequest *req, HTTPResponse *rsp) {
     if (strcmp(req->path(), "/") == 0) {
       rsp->RedirectTo("/doc/corpus.html");
     } else {
@@ -202,14 +203,15 @@ int main(int argc, char *argv[]) {
     }
   });
 
-  http.Register("/favicon.ico", [](HTTPRequest *req, HTTPResponse *rsp) {
+  http->Register("/favicon.ico", [](HTTPRequest *req, HTTPResponse *rsp) {
     rsp->RedirectTo("/common/image/appicon.ico");
   });
 
-  CHECK(http.Start());
+  CHECK(http->Start());
 
   LOG(INFO) << "HTTP server running";
-  http.Wait();
+  http->Wait();
+  delete http;
 
   LOG(INFO) << "HTTP server done";
   return 0;

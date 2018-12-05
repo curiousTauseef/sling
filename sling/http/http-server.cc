@@ -14,28 +14,15 @@
 
 #include "sling/http/http-server.h"
 
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/epoll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <time.h>
-
 #include "sling/base/logging.h"
 #include "sling/string/ctype.h"
 #include "sling/string/numbers.h"
 
+REGISTER_COMPONENT_REGISTRY("http server", sling::HTTPServer);
+
 namespace sling {
 
 namespace {
-
-// Return system error.
-Status Error(const char *context) {
-  return Status(errno, context, strerror(errno));
-}
 
 // Returns value for ASCII hex digit.
 int HexDigit(int c) {
@@ -227,28 +214,17 @@ void HTTPBuffer::append(const char *data, int size) {
   end += size;
 }
 
-HTTPServer::HTTPServer(const HTTPServerOptions &options, int port)
-    : options_(options), port_(port) {
-  sock_ = -1;
-  pollfd_ = -1;
-  stop_ = false;
-  connections_ = nullptr;
+HTTPServer *HTTPServer::New(const HTTPServerOptions &options) {
+  HTTPServer *http = HTTPServer::Create(options.driver);
+  http->options_ = options;
+  return http;
+}
 
-  // Register standard handlers.
+HTTPServer::HTTPServer() {
   Register("/helpz", this, &HTTPServer::HelpHandler);
-  Register("/connz", this, &HTTPServer::ConnectionHandler);
 }
 
 HTTPServer::~HTTPServer() {
-  // Wait for workers to terminate.
-  workers_.Join();
-
-  // Close listening socket.
-  if (sock_ != -1) close(sock_);
-
-  // Close poll descriptor.
-  if (pollfd_ != -1) close(pollfd_);
-
   // Delete connections.
   HTTPConnection *conn = connections_;
   while (conn != nullptr) {
@@ -293,173 +269,6 @@ HTTPServer::Handler HTTPServer::FindHandler(HTTPRequest *request) const {
   }
 }
 
-Status HTTPServer::Start() {
-  int rc;
-
-  // Create poll file descriptor.
-  pollfd_ = epoll_create(1);
-  if (pollfd_ < 0) return Error("epoll_create");
-
-  // Create listen socket.
-  sock_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (sock_ < 0) return Error("socket");
-  rc = fcntl(sock_, F_SETFL, O_NONBLOCK);
-  if (rc < 0) return Error("fcntl");
-  int on = 1;
-  rc = setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-  if (rc < 0) return Error("setsockopt");
-
-  // Bind listen socket.
-  struct sockaddr_in sin;
-  sin.sin_addr.s_addr = htonl(INADDR_ANY);
-  sin.sin_family = AF_INET;
-  sin.sin_port = htons(port_);
-  rc = bind(sock_, reinterpret_cast<struct sockaddr *>(&sin), sizeof(sin));
-  if (rc < 0) return Error("bind");
-
-  // Start listening on socket.
-  rc = listen(sock_, SOMAXCONN);
-  if (rc < 0) return Error("listen");
-
-  // Add listening socket to poll descriptor.
-  struct epoll_event ev;
-  ev.events = EPOLLIN;
-  ev.data.ptr = nullptr;
-  rc = epoll_ctl(pollfd_, EPOLL_CTL_ADD, sock_, &ev);
-  if (rc < 0) return Error("epoll_ctl");
-
-  // Start workers.
-  workers_.Start(options_.num_workers, [this](int index) { this->Worker(); });
-
-  return Status::OK;
-}
-
-void HTTPServer::Worker() {
-  // Allocate event structure.
-  int max_events = options_.max_events;
-  struct epoll_event *events = new epoll_event[max_events];
-
-  // Keep processing events until server is shut down.
-  while (!stop_) {
-    // Get new events.
-    idle_++;
-    int rc = epoll_wait(pollfd_, events, max_events, 2000);
-    idle_--;
-    if (stop_) break;
-    if (rc < 0) {
-      LOG(ERROR) << Error("epoll_wait");
-      break;
-    }
-    if (rc == 0) {
-      ShutdownIdleConnections();
-      continue;
-    }
-
-    // Start new worker if all workers are busy.
-    if (++active_ == workers_.size()) {
-      MutexLock lock(&mu_);
-      if (workers_.size() < options_.max_workers) {
-        VLOG(3) << "Starting new worker thread " << workers_.size();
-        workers_.Start(1, [this](int index) { this->Worker(); });
-      } else {
-        LOG(WARNING) << "All HTTP worker threads are busy";
-      }
-    }
-
-    // Process events.
-    for (int i = 0; i < rc; ++i) {
-      struct epoll_event *ev = &events[i];
-      auto *conn = reinterpret_cast<HTTPConnection *>(ev->data.ptr);
-      if (conn == nullptr) {
-        // New connection.
-        AcceptConnection();
-      } else {
-        // Check if connection has been closed.
-        if (ev->events & (EPOLLHUP | EPOLLERR)) {
-          // Detach socket from poll descriptor.
-          if (ev->events & EPOLLERR) {
-            VLOG(5) << "Error polling socket " << conn->sock_;
-          }
-          rc = epoll_ctl(pollfd_, EPOLL_CTL_DEL, conn->sock_, ev);
-          if (rc < 0) {
-            VLOG(2) << Error("epoll_ctl");
-          } else {
-            // Delete client connection.
-            VLOG(3) << "Close HTTP connection " << conn->sock_;
-            RemoveConnection(conn);
-            delete conn;
-          }
-        } else {
-          // Process connection data.
-          VLOG(5) << "Begin " << conn->sock_ << " in state " << conn->State();
-          do {
-            Status s = conn->Process();
-            if (!s.ok()) {
-              LOG(ERROR) << "HTTP error: " << s;
-              conn->state_ = HTTP_STATE_TERMINATE;
-            }
-            if (conn->state_ == HTTP_STATE_IDLE) {
-              VLOG(5) << "Process " << conn->sock_ << " again";
-            }
-          } while (conn->state_ == HTTP_STATE_IDLE);
-          VLOG(5) << "End " << conn->sock_ << " in state " << conn->State();
-
-          if (conn->state_ == HTTP_STATE_TERMINATE) {
-            conn->Shutdown();
-            VLOG(5) << "Shutdown HTTP connection";
-          } else {
-            conn->last_ = time(0);
-          }
-        }
-      }
-    }
-    active_--;
-  }
-
-  // Free event structure.
-  delete [] events;
-}
-
-void HTTPServer::Wait() {
-  // Wait until all workers have terminated.
-  workers_.Join();
-}
-
-void HTTPServer::Shutdown() {
-  // Set stop flag to terminate worker threads.
-  stop_ = true;
-}
-
-void HTTPServer::AcceptConnection() {
-  int rc;
-
-  // Accept new connection from listen socket.
-  struct sockaddr_in addr;
-  socklen_t len = sizeof(addr);
-  int sock = accept(sock_, reinterpret_cast<struct sockaddr *>(&addr), &len);
-  if (sock < 0) {
-    if (errno != EAGAIN) LOG(WARNING) << Error("listen");
-    return;
-  }
-
-  // Set non-blocking mode for socket.
-  int flags = fcntl(sock, F_GETFL, 0);
-  rc = fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-  if (rc < 0) LOG(WARNING) << Error("fcntl");
-
-  // Create new connection.
-  VLOG(3) << "New HTTP connection " << sock;
-  HTTPConnection *conn = new HTTPConnection(this, sock);
-  AddConnection(conn);
-
-  // Add new connection to poll descriptor.
-  struct epoll_event ev;
-  ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-  ev.data.ptr = conn;
-  rc = epoll_ctl(pollfd_, EPOLL_CTL_ADD, sock, &ev);
-  if (rc < 0) LOG(WARNING) << Error("epoll_ctl");
-}
-
 void HTTPServer::AddConnection(HTTPConnection *conn) {
   MutexLock lock(&mu_);
   conn->next_ = connections_;
@@ -474,20 +283,6 @@ void HTTPServer::RemoveConnection(HTTPConnection *conn) {
   if (conn->next_ != nullptr) conn->next_->prev_ = conn->prev_;
   if (conn == connections_) connections_ = conn->next_;
   conn->next_ = conn->prev_ = nullptr;
-}
-
-void HTTPServer::ShutdownIdleConnections() {
-  if (options_.max_idle <= 0) return;
-  MutexLock lock(&mu_);
-  time_t expire = time(0) - options_.max_idle;
-  HTTPConnection *conn = connections_;
-  while (conn != nullptr) {
-    if (conn->last_ < expire) {
-      conn->Shutdown();
-      VLOG(5) << "Shut down idle connection";
-    }
-    conn = conn->next_;
-  }
 }
 
 void HTTPServer::HelpHandler(HTTPRequest *req, HTTPResponse *rsp) {
@@ -511,103 +306,7 @@ void HTTPServer::HelpHandler(HTTPRequest *req, HTTPResponse *rsp) {
   rsp->Append("</body></html>\n");
 }
 
-void HTTPServer::ConnectionHandler(HTTPRequest *req, HTTPResponse *rsp) {
-  static const char *header_state_name[] = {
-    "FIRSTWORD", "FIRSTWS", "SECONDWORD", "SECONDWS", "THIRDWORD",
-    "LINE", "LF", "CR", "CRLF", "CRLFCR", "DONE", "BOGUS",
-  };
-
-  MutexLock lock(&mu_);
-  rsp->SetContentType("text/html");
-  rsp->set_status(200);
-  rsp->Append("<html><head><title>connz</title></head><body>\n");
-  rsp->Append("<table border=\"1\"><tr>\n");
-  rsp->Append("<td>Socket</td>");
-  rsp->Append("<td>Client address</td>");
-  rsp->Append("<td>Socket status</td>");
-  rsp->Append("<td>State</td>");
-  rsp->Append("<td>Header state</td>");
-  rsp->Append("<td>Keep</td>");
-  rsp->Append("<td>Idle</td>");
-  rsp->Append("<td>URL</td>");
-  rsp->Append("</tr>\n");
-  HTTPConnection *conn = connections_;
-  time_t now = time(0);
-  while (conn != nullptr) {
-    rsp->Append("<tr>");
-
-    // Socket.
-    rsp->Append("<td>" + SimpleItoa(conn->sock_) + "</td>");
-
-    // Client address.
-    struct sockaddr_in peer;
-    socklen_t plen = sizeof(peer);
-    struct sockaddr *saddr = reinterpret_cast<sockaddr *>(&peer);
-    if (getpeername(conn->sock_, saddr, &plen) == -1) {
-      rsp->Append("<td>?</td>");
-    } else {
-      rsp->Append("<td>");
-      rsp->Append(inet_ntoa(peer.sin_addr));
-      rsp->Append(":");
-      rsp->Append(SimpleItoa(ntohs(peer.sin_port)));
-      rsp->Append("</td>");
-    }
-
-    // Socket state.
-    int err = 0;
-    socklen_t errlen = sizeof(err);
-    int rc  = getsockopt(conn->sock_, SOL_SOCKET, SO_ERROR, &err, &errlen);
-    const char *error = "OK";
-    if (rc != 0) {
-      error = strerror(rc);
-    } else if (err != 0) {
-      error = strerror(err);
-    }
-    rsp->Append("<td>");
-    rsp->Append(error);
-    rsp->Append("</td>");
-
-    // Connection state.
-    rsp->Append("<td>");
-    rsp->Append(conn->State());
-    rsp->Append("</td>");
-
-    // Header parsing state.
-    rsp->Append("<td>");
-    rsp->Append(header_state_name[conn->header_state_]);
-    rsp->Append("</td>");
-
-    // Keep alive.
-    rsp->Append(conn->keep_ ? "<td>Y</td>" : "<td>N</td>");
-
-    // Idle time.
-    rsp->Append("<td>" + SimpleItoa(now - conn->last_) + "</td>");
-
-    // Request URL.
-    rsp->Append("<td>");
-    if (conn->request()) {
-      if (conn->request()->full_path()) {
-        rsp->Append(HTMLEscape(conn->request()->full_path()));
-      }
-      if (conn->request()->query()) {
-        rsp->Append("?");
-        rsp->Append(HTMLEscape(conn->request()->query()));
-      }
-    }
-    rsp->Append("</td>");
-
-    rsp->Append("</tr>\n");
-    conn = conn->next_;
-  }
-  rsp->Append("</table>\n");
-  rsp->Append("<p>" + std::to_string(workers_.size()) + " worker threads, " +
-              std::to_string(active_) + " active, " +
-              std::to_string(idle_) + " idle</p>\n");
-  rsp->Append("</body></html>\n");
-}
-
-HTTPConnection::HTTPConnection(HTTPServer *server, int sock)
-    : server_(server), sock_(sock) {
+HTTPConnection::HTTPConnection(HTTPServer *server) : server_(server) {
   next_ = prev_ = nullptr;
   request_ = nullptr;
   response_ = nullptr;
@@ -615,14 +314,10 @@ HTTPConnection::HTTPConnection(HTTPServer *server, int sock)
   state_ = HTTP_STATE_IDLE;
   header_state_ = HDR_STATE_FIRSTWORD;
   keep_ = false;
-  last_ = time(0);
 }
 
 HTTPConnection::~HTTPConnection() {
   MutexLock lock(&mu_);
-
-  // Close client connection.
-  close(sock_);
 
   // Cleanup.
   if (file_ != nullptr) file_->Close();
@@ -801,59 +496,6 @@ Status HTTPConnection::Process() {
     default:
       return Status(1, "Invalid HTTP state");
   }
-}
-
-Status HTTPConnection::Recv(HTTPBuffer *buffer, bool *done) {
-  *done = false;
-  int rc = recv(sock_, buffer->end, buffer->remaining(), 0);
-  if (rc <= 0) {
-    *done = true;
-    if (rc == 0) {
-      // Connection closed.
-      state_ = HTTP_STATE_TERMINATE;
-      return Status::OK;
-    } else if (errno == EAGAIN) {
-      // No more data available for now.
-      VLOG(6) << "Recv " << sock_ << " again";
-      return Status::OK;
-    } else {
-      // Receive error.
-      VLOG(6) << "Recv " << sock_ << " error";
-      return Error("recv");
-    }
-  }
-  VLOG(6) << "Recv " << sock_ << ", " << rc << " bytes";
-  buffer->end += rc;
-  return Status::OK;
-}
-
-Status HTTPConnection::Send(HTTPBuffer *buffer, bool *done) {
-  *done = false;
-  int rc  = send(sock_, buffer->start, buffer->size(), MSG_NOSIGNAL);
-  if (rc <= 0) {
-    *done = true;
-    if (rc == 0) {
-      // Connection closed.
-      VLOG(6) << "Send " << sock_ << " closed";
-      state_ = HTTP_STATE_TERMINATE;
-      return Status::OK;
-    } else if (errno == EAGAIN) {
-      // Output queue full.
-      VLOG(6) << "Send " << sock_ << " again";
-      return Status::OK;
-    } else {
-      // Send error.
-      VLOG(6) << "Send " << sock_ << " done";
-      return Error("send");
-    }
-  }
-  VLOG(6) << "Send " << sock_ << ", " << rc << " bytes";
-  buffer->start += rc;
-  return Status::OK;
-}
-
-void HTTPConnection::Shutdown() {
-  shutdown(sock_, SHUT_RDWR);
 }
 
 void HTTPConnection::Dispatch() {

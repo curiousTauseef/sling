@@ -197,7 +197,7 @@ cc_binary(
     "//sling/file:posix",
     "//sling/file:recordio",
     "//sling/frame",
-    "//sling/http:http-server",
+    "//sling/http",
     "//sling/http:static-content",
     "//sling/http:web-service",
     "//sling/nlp/document",

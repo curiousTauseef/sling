@@ -35,21 +35,23 @@ int main(int argc, char *argv[]) {
 
   LOG(INFO) << "Start HTTP server on port " << FLAGS_port;
   HTTPServerOptions options;
-  HTTPServer http(options, FLAGS_port);
+  options.port = FLAGS_port;
+  HTTPServer *http = HTTPServer::New(options);
 
   KnowledgeService kb;
   kb.Load(&commons, FLAGS_names);
   commons.Freeze();
 
-  kb.Register(&http);
-  http.Register("/", [](HTTPRequest *req, HTTPResponse *rsp) {
+  kb.Register(http);
+  http->Register("/", [](HTTPRequest *req, HTTPResponse *rsp) {
     rsp->RedirectTo("/kb");
   });
 
-  CHECK(http.Start());
+  CHECK(http->Start());
 
   LOG(INFO) << "HTTP server running";
-  http.Wait();
+  http->Wait();
+  delete http;
 
   LOG(INFO) << "HTTP server done";
   return 0;
