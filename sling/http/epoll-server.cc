@@ -208,6 +208,7 @@ class EPollHTTPServer : public HTTPServer {
       idle_--;
       if (stop_) break;
       if (rc < 0) {
+        if (errno == EINTR) continue;
         LOG(ERROR) << Error("epoll_wait");
         break;
       }

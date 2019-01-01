@@ -59,6 +59,11 @@ class WikidataConverter {
     return store->Lookup(id);
   }
 
+  // Return symbol for Wikidata sense.
+  static Handle Sense(Store *store, Text id) {
+    return store->Lookup(id);
+  }
+
   // Return symbol for Wikidata property.
   static Handle Property(Store *store, int id) {
     return store->Lookup(StrCat("P", id));
@@ -73,6 +78,9 @@ class WikidataConverter {
 
   // Convert Wikidata quantity.
   Handle ConvertQuantity(const Frame &value);
+
+  // Convert Wikidata monolingual text.
+  Handle ConvertText(const Frame &value);
 
   // Convert Wikidata timestamp.
   Handle ConvertTime(const Frame &value);
@@ -105,6 +113,7 @@ class WikidataConverter {
     Handle wikisite;
   };
   HandleMap<LanguageInfo> languages_;
+  std::unordered_map<string, Handle> language_map_;
 
   Name n_name_{names_, "name"};
   Name n_description_{names_, "description"};
@@ -128,6 +137,7 @@ class WikidataConverter {
   Name n_lat_{names_, "/w/lat"};
   Name n_lng_{names_, "/w/lng"};
   Name n_globe_{names_, "/w/globe"};
+  Name n_lang_mul_{names_, "/lang/mul"};
 
   Name n_alias_{names_, "alias"};
   Name n_sources_{names_, "sources"};
@@ -151,6 +161,7 @@ class WikidataConverter {
   Name s_globe_{names_, "globe"};
   Name s_mainsnak_{names_, "mainsnak"};
   Name s_text_{names_, "text"};
+  Name s_language_{names_, "language"};
   Name s_amount_{names_, "amount"};
   Name s_unit_{names_, "unit"};
   Name s_upperbound_{names_, "upperBound"};

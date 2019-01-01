@@ -23,6 +23,10 @@ import sys
 import struct
 
 flags.define("--dt", default=myelin.DT_FLOAT)
+flags.define("--test")
+flags.define("--thorough", default=False, action='store_true')
+flags.define("--repeat", default=1, type=int)
+
 flags.parse()
 dt = flags.arg.dt
 
@@ -35,6 +39,12 @@ class Test:
     self.name = f.name
     self.runs = 0
     self.errors = 0
+
+  def passed(self):
+    return self.runs - self.errors
+
+  def failed(self):
+    return self.errors
 
 tests = {}
 
@@ -152,6 +162,9 @@ def simulate(flow, f, data):
       seq = []
       for k in range(n): seq.append(v[i[k]])
       v[o[0]] = np.concatenate(tuple(seq), axis)
+    elif op.type == "Split":
+      splits = np.split(v[i[0]], v[i[1]], v[i[2]])
+      for k in range(len(splits)): v[o[k]] = splits[k]
     else:
       raise Exception("No NumPy support for " + op.type)
 
@@ -167,7 +180,8 @@ def check(flow, variant, lo=-10.0, hi=10.0):
   net = compiler.compile(flow)
   for f in flow.funcs.itervalues():
     # Output progress.
-    print "\r" + "Running " + f.name + " " + str(variant) + ": \033[K",
+    if flags.arg.v >= 1:
+      print "Running %s %s" % (f.name, str(variant))
 
     # Create data instance for cell.
     cell = net.cell(f.name)
@@ -184,7 +198,8 @@ def check(flow, variant, lo=-10.0, hi=10.0):
       np.copyto(a, r, casting="unsafe")
 
     # Compute cell.
-    data.compute()
+    for n in range(flags.arg.repeat):
+      data.compute()
 
     # Compute function using numpy.
     baseline = simulate(flow, f, data)
@@ -201,7 +216,8 @@ def check(flow, variant, lo=-10.0, hi=10.0):
       if b.dtype == bool: t = np.array(t, dtype=bool)
       if not np.allclose(t, b):
         test.errors += 1
-        print "mismatch in", f.name, "for", o.name
+        print
+        print "mismatch in", f.name, variant, "for", o.name
         print "inputs:"
         for i in flow.inputs(f):
           if i.data == None: print i.name, np.asarray(data[i])
@@ -212,6 +228,9 @@ def check(flow, variant, lo=-10.0, hi=10.0):
         if b.dtype != bool:
           print "diff:"
           print b - np.asarray(t)
+
+  if flags.arg.profile:
+    print net.profile()
 
 # Tests
 
@@ -446,6 +465,13 @@ def concat_test(n, m):
   c = f.concat([a, b])
   check(flow, (n, m))
 
+def split_test(n, m):
+  flow = myelin.Flow()
+  f = flow.define("split")
+  x = f.var("x", dt, [1, n])
+  y = f.split(x, m, 1)
+  check(flow, (n, m))
+
 def equal_test(n):
   flow = myelin.Flow()
   f = flow.define("equal")
@@ -520,12 +546,25 @@ def mul_const_test(n, c):
   x = f.mul(x, y)
   check(flow, (n, c))
 
+# Check for specific test to run.
+if flags.arg.test:
+  print "Running test", flags.arg.test
+  exec(flags.arg.test)
+  print
+  quit()
+
 # Run tests for different size ranges.
-sizes = range(1, 48) + [64, 128, 256]
+if flags.arg.thorough:
+  sizes = range(1, 48) + [64, 128, 256]
+else:
+  sizes = range(1, 8) + [9, 14, 15, 16, 31, 32, 33, 64]
 
 for i in sizes:
   for j in sizes:
     concat_test(i, j)
+  for j in xrange(1, i + 1):
+    if i % j == 0:
+      split_test(i, j)
 
 for i in sizes:
   add_test(i)
@@ -558,6 +597,7 @@ for i in sizes:
     min_test(i)
     max_test(i)
     norm_test(i)
+
     equal_test(i)
     not_equal_test(i)
     less_test(i)
@@ -572,28 +612,19 @@ for i in sizes:
       cos_test(i)
       argmax_test(i)
 
-if dt == myelin.DT_FLOAT or dt == myelin.DT_DOUBLE:
-  for i in sizes:
-    for j in sizes:
-      matmul_transpose_test(i, j)
-      for k in sizes:
-        matmul_test(i, j, k)
-        matmul_add_test(i, j, k)
-        matmul_add_relu_test(i, j, k)
-  matmul_test(2048, 2048, 2048)
-else:
-  # Only vector-matrix matmul supported for integers.
-  for i in sizes:
-    for j in sizes:
-      matmul_test(1, i, j)
-      matmul_add_test(1, i, j)
+for i in sizes:
+  for j in sizes:
+    matmul_transpose_test(i, j)
+    for k in sizes:
+      matmul_test(i, j, k)
+      matmul_add_test(i, j, k)
       if dt != myelin.DT_INT8:
         # Rounding with MatMulAddRelu not compatible with NymPy for INT8.
-        matmul_add_relu_test(1, i, j)
-
+        matmul_add_relu_test(i, j, k)
+if flags.arg.thorough:
+  matmul_test(1024, 1024, 1024)
 
 # Output test results.
-print "\r\033[K"
 print "Test results"
 print "============"
 print
@@ -601,11 +632,11 @@ print
 errors = 0
 for name in sorted(tests):
   t = tests[name]
-  errors += t.errors
-  if t.errors == 0:
-    print "%-20s %7d runs" % (t.name, t.runs)
+  errors += t.failed()
+  if t.failed() == 0:
+    print "%-20s %7d passed" % (t.name, t.passed())
   else:
-    print "%-20s %7d runs %7d errors" % (t.name, t.runs, t.errors)
+    print "%-20s %7d passed %7d failed" % (t.name, t.passed(), t.failed())
 print
 
 if errors > 0:

@@ -167,7 +167,10 @@ static const TemplatePrefixMap template_prefix = {
   {"subst",               WikiParser::TMPL_SUBST},
 
   {"#expr",               WikiParser::TMPL_EXPR},
+  {"#EXPR",               WikiParser::TMPL_EXPR},
+  {"#if",                 WikiParser::TMPL_IF},
   {"#ifexpr",             WikiParser::TMPL_IFEXPR},
+  {"#ifexist",            WikiParser::TMPL_IFEXIST},
   {"#ifeq",               WikiParser::TMPL_IFEQ},
   {"#tag",                WikiParser::TMPL_TAG},
   {"#Tag",                WikiParser::TMPL_TAG},
@@ -175,7 +178,14 @@ static const TemplatePrefixMap template_prefix = {
   {"#time",               WikiParser::TMPL_TIME},
   {"#invoke",             WikiParser::TMPL_INVOKE},
   {"#section",            WikiParser::TMPL_SECTION},
+  {"#section-h",          WikiParser::TMPL_SECTIONH},
   {"#property",           WikiParser::TMPL_PROPERTY},
+  {"#Property",           WikiParser::TMPL_PROPERTY},
+  {"#dateformat",         WikiParser::TMPL_DATEFORMAT},
+  {"#formatdate",         WikiParser::TMPL_FORMATDATE},
+  {"#list",               WikiParser::TMPL_LIST},
+  {"#statements",         WikiParser::TMPL_STATEMENTS},
+  {"#switch",             WikiParser::TMPL_SWITCH},
 };
 
 }  // namespace
@@ -244,7 +254,7 @@ void WikiParser::ParseUntil(char stop) {
         if (Matches("[[")) {
           ParseLinkBegin();
         } else {
-          ParseUrl();
+          ParseUrlBegin();
         }
         break;
 
@@ -252,7 +262,7 @@ void WikiParser::ParseUntil(char stop) {
         if (Matches("]]")) {
           ParseLinkEnd();
         } else {
-          ptr_++;
+          ParseUrlEnd();
         }
         break;
 
@@ -297,15 +307,17 @@ void WikiParser::ParseNewLine() {
   }
 
   // Parse image link at beginning of line inside gallery tag.
-  if (Inside(LINK, GALLERY)) {
-    UnwindUntil(LINK);
-    ParseGallery();
-    return;
-  }
-  if (Inside(IMAGE, GALLERY)) {
-    UnwindUntil(IMAGE);
-    ParseGallery();
-    return;
+  if (Inside(GALLERY)) {
+    if (Inside(LINK, GALLERY)) {
+      UnwindUntil(LINK);
+      ParseGallery();
+      return;
+    }
+    if (Inside(IMAGE, GALLERY)) {
+      UnwindUntil(IMAGE);
+      ParseGallery();
+      return;
+    }
   }
 
   // Check for elements that can start line.
@@ -430,6 +442,12 @@ void WikiParser::ParseTemplateEnd() {
 }
 
 void WikiParser::ParseArgument() {
+  // Allow | as verbatim text in URL nodes.
+  if (Inside(URL, TEMPLATE, LINK)) {
+    ptr_++;
+    return;
+  }
+
   // Terminate argument.
   EndText();
   if (Inside(ARG, TEMPLATE, LINK)) {
@@ -447,17 +465,13 @@ void WikiParser::ParseArgument() {
   // Try to parse argument name.
   const char *name = ptr_;
   const char *p = name;
-  while (*p != 0 && *p != ' ' && *p != '\n' && *p != '=' &&
+  while (*p != 0 && *p != '\n' && *p != '=' &&
          *p != ']' && *p != '|' && *p != '}' && *p != '{') {
     p++;
   }
-  if (*p == '=' || *p == ' ') {
-    const char *q = p;
-    while (*q == ' ') q++;
-    if (*q == '=') {
-      SetName(node, name, p);
-      ptr_ = q + 1;
-    }
+  if (*p == '=') {
+    SetName(node, name, p);
+    ptr_ = p + 1;
   }
 
   SkipWhitespace();
@@ -501,28 +515,46 @@ void WikiParser::ParseLinkEnd() {
   txt_ = ptr_;
 }
 
-void WikiParser::ParseUrl() {
+void WikiParser::ParseUrlBegin() {
+  // Check for valid url, i.e. it must start with protocol://.
+  const char *p = ptr_ + 1;
+  while (ascii_isalpha(*p)) p++;
+  if (p[0] != ':' || p[1] != '/' || p[2] != '/') {
+    ptr_++;
+    return;
+  }
+
+  // Start URL node.
   EndText();
   int node = Push(URL);
   ptr_ += 1;
 
   // Parse url.
   const char *name = ptr_;
-  while (*ptr_ != 0 && *ptr_ != ' ' && *ptr_ != ']') ptr_++;
+  while (*ptr_ != 0 && *ptr_ != ' ' && *ptr_ != '\n' && *ptr_ != ']') ptr_++;
   SetName(node, name, ptr_);
 
-  if (*ptr_ == ' ') {
-    // Parse the rest of the URL element as wikitext.
-    while (*ptr_ == ' ') ptr_++;
-    txt_ = ptr_;
-    ParseUntil(']');
-  } else {
+  while (*ptr_ == ' ') ptr_++;
+  if (*ptr_ == ']') {
     txt_ = name;
+  } else {
+    txt_ = ptr_;
+  }
+}
+
+void WikiParser::ParseUrlEnd() {
+  if (!Inside(URL)) {
+    // Ignore unmatched ].
+    ptr_ += 1;
+    return;
   }
 
-  UnwindUntil(URL);
-  if (*ptr_ == ']') ptr_++;
-  nodes_[node].end = ptr_;
+  int node = UnwindUntil(URL);
+  ptr_ += 1;
+  if (node != -1) {
+    Node &n = nodes_[node];
+    n.end = ptr_;
+  }
   txt_ = ptr_;
 }
 
@@ -564,6 +596,7 @@ void WikiParser::ParseTag() {
     if (Inside(REF)) UnwindUntil(REF);
   } else if (Matches("</gallery>")) {
     ptr_ += 10;
+    txt_ = ptr_;
     if (Inside(GALLERY)) UnwindUntil(GALLERY);
   } else {
     // Parse '<' (BTAG) or '</' (ETAG).
@@ -628,7 +661,7 @@ void WikiParser::ParseGallery() {
   if (*ptr_ == '<') return;
   int node = Push(LINK);
   const char *name = ptr_;
-  while (*ptr_ != 0 && *ptr_ != '|' && *ptr_ != '\n')  ptr_++;
+  while (*ptr_ != 0 && *ptr_ != '|' && *ptr_ != '<' && *ptr_ != '\n')  ptr_++;
   SetName(node, name, ptr_);
   txt_ = ptr_;
   nodes_[node].CheckSpecialLink();
@@ -848,263 +881,6 @@ bool WikiParser::ParseAttributes(const char *delimiters) {
   return true;
 }
 
-bool WikiParser::GetIntro(int *begin, int *end) {
-  // Look for FONT-TEXT-FONT sequence at the top level of the AST.
-  if (nodes_.empty()) return false;
-
-  // Search for FONT node.
-  int index = nodes_[0].first_child;
-  while (index != -1) {
-    Node &node = nodes_[index];
-    if (node.type == FONT) {
-      // FONT node found.
-      index = node.next_sibling;
-      break;
-    } else if (node.type == TEXT) {
-      // No text allowed before intro.
-      for (const char *p = node.begin; p < node.end; ++p) {
-        if (*p != ' ' && *p != '\n') return false;
-      }
-    } else if (node.type == HEADING) {
-      // Intro text must be in the first section.
-      return false;
-    }
-    index = node.next_sibling;
-  }
-  if (index == -1) return false;
-
-  // Find end of bold/italics text.
-  *begin = nodes_[index].text_begin;
-  while (index != -1) {
-    Node &node = nodes_[index];
-    if (node.type == FONT) {
-      *end = node.text_begin;
-      return *begin != -1 && *end != -1;
-    }
-    if (node.type != TEXT) return false;
-    index = node.next_sibling;
-  }
-  return false;
-}
-
-void WikiParser::ExtractSimpleText(const Node &node, string *text) {
-  // Extract text from text node.
-  if (node.type == TEXT) {
-    bool brk = false;
-    for (const char *p = node.begin; p < node.end; ++p) {
-      if (*p == ' ' || *p == '\n') {
-        brk = true;
-      } else {
-        if (brk) {
-          if (!text->empty()) text->push_back(' ');
-          brk = false;
-        }
-        text->push_back(*p);
-      }
-    }
-  }
-
-  // Extract text from child nodes.
-  int child = node.first_child;
-  bool in_ref = false;
-  while (child != -1) {
-    Node &sub = nodes_[child];
-    if ((sub.type == BTAG || sub.type == ETAG) && sub.name() == "ref") {
-      in_ref = sub.type == BTAG;
-    } else if (!in_ref) {
-      ExtractSimpleText(sub, text);
-    }
-    child = sub.next_sibling;
-  }
-}
-
-void WikiParser::ExtractToString(int index, string *text) {
-  // Save current text extraction state.
-  string *saved_output = output_;
-  int saved_line_breaks = line_breaks_;
-
-  // Extract text to string buffer
-  output_ = text;
-  line_breaks_ = 0;
-  Extract(index);
-
-  // Restore text extraction state.
-  output_ = saved_output;
-  line_breaks_ = saved_line_breaks;
-}
-
-void WikiParser::Extract(int index) {
-  Node &node = nodes_[index];
-  if (output_ == &text_) node.text_begin = text_.size();
-  switch (node.type) {
-    case DOCUMENT: ExtractChildren(index); break;
-    case ARG: ExtractChildren(index); break;
-    case ATTR: break;
-    case TEXT: Append(nodes_[index]); break;
-    case FONT: ExtractFont(index); break;
-    case TEMPLATE: break;
-    case LINK: ExtractLink(index); break;
-    case IMAGE: break;
-    case CATEGORY: break;
-    case URL: ExtractUrl(index); break;
-    case COMMENT: break;
-    case TAG: ExtractTag(index); break;
-    case BTAG: break;
-    case ETAG: break;
-    case MATH: break;
-    case GALLERY: ExtractChildren(index); break;
-    case REF: break;
-    case HEADING: ExtractHeading(index); break;
-    case INDENT: ExtractChildren(index); break;
-    case TERM: ExtractChildren(index); break;
-    case UL: ExtractListItem(index); break;
-    case OL: ExtractListItem(index); break;
-    case HR: break;
-    case SWITCH: break;
-    case TABLE: ExtractTable(index); break;
-    case CAPTION: break;
-    case ROW: ExtractChildren(index); break;
-    case HEADER: ExtractChildren(index); break;
-    case CELL: ExtractChildren(index); break;
-    case BREAK: break;
-  }
-  if (output_ == &text_) node.text_end = text_.size();
-}
-
-void WikiParser::ExtractLink(int index) {
-  ExtractChildren(index);
-}
-
-void WikiParser::ExtractUrl(int index) {
-  ExtractChildren(index);
-}
-
-void WikiParser::ExtractTag(int index) {
-  if (nodes_[index].name() == "br") Append("<br>");
-}
-
-void WikiParser::ExtractListItem(int index) {
-  Append("<li>");
-  ExtractChildren(index);
-  Append("</li>");
-}
-
-void WikiParser::ExtractTable(int index) {
-  Append("<table border=1>");
-  int child = nodes_[index].first_child;
-  while (child != -1) {
-    Node &node = nodes_[child];
-    if (node.type == ROW) {
-      ExtractTableRow(child);
-    } else {
-      Extract(child);
-    }
-    child = node.next_sibling;
-  }
-  Append("</table>");
-}
-
-void WikiParser::ExtractTableRow(int index) {
-  Append("<tr>");
-  int child = nodes_[index].first_child;
-  while (child != -1) {
-    Node &node = nodes_[child];
-    if (node.type == HEADER) {
-      Append("<th>");
-      Extract(child);
-      Append("</th>");
-    } else if (node.type == CELL) {
-      Append("<td>");
-      Extract(child);
-      Append("</td>");
-    } else {
-      Extract(child);
-    }
-    child = node.next_sibling;
-  }
-  Append("</tr>");
-}
-
-void WikiParser::ExtractHeading(int index) {
-  if (font_ != 0) {
-    switch (font_) {
-      case 2: Append("</em>"); break;
-      case 3: Append("</b>"); break;
-      case 4: Append("</em></b>"); break;
-      case 5: Append("</em></b>"); break;
-    }
-    font_ = 0;
-  }
-
-  Node &node = nodes_[index];
-  Append(StrCat("\n\n<h", node.param, ">"));
-  ExtractChildren(index);
-  Append(StrCat("</h", node.param, ">\n"));
-}
-
-void WikiParser::ExtractFont(int index) {
-  Node &node = nodes_[index];
-  if (font_ != 0) {
-    switch (font_) {
-      case 2: Append("</em>"); break;
-      case 3: Append("</b>"); break;
-      case 4: Append("</em></b>"); break;
-      case 5: Append("</em></b>"); break;
-    }
-    font_ = 0;
-  } else {
-    switch (node.param) {
-      case 2: Append("<em>"); break;
-      case 3: Append("<b>"); break;
-      case 4: Append("<b><em>"); break;
-      case 5: Append("<b><em>"); break;
-    }
-    font_ = node.param;
-  }
-}
-
-void WikiParser::ExtractChildren(int index) {
-  int child = nodes_[index].first_child;
-  bool in_ref = false;
-  while (child != -1) {
-    Node &node = nodes_[child];
-    switch (node.type) {
-      case UL:
-        Append("<ul>");
-        while (child != -1 && nodes_[child].type == UL) {
-          Extract(child);
-          child = nodes_[child].next_sibling;
-        }
-        Append("</ul>");
-        continue;
-
-      case OL:
-        Append("<ol>");
-        while (child != -1 && nodes_[child].type == OL) {
-          Extract(child);
-          child = nodes_[child].next_sibling;
-        }
-        Append("</ol>");
-        continue;
-
-      case BTAG:
-        if (node.name() == "ref") in_ref = true;
-        break;
-
-      case ETAG:
-        if (node.name() == "ref") in_ref = false;
-        Append("\xe2\x80\x8b");  // zero-width space
-        break;
-
-      default: ;
-    }
-
-    if (!in_ref) Extract(child);
-
-    child = node.next_sibling;
-  }
-}
-
 void WikiParser::PrintAST(int index, int indent) {
   std::cout << StringPrintf("%05d ", index);
   for (int i = 0; i < indent; ++i) std::cout << "  ";
@@ -1113,7 +889,7 @@ void WikiParser::PrintAST(int index, int indent) {
   if (node.param != 0) {
     std::cout << "(" << node.param << ")";
   }
-  if (node.name_begin != nullptr && node.name_end != nullptr) {
+  if (node.named()) {
     std::cout << "[" << node.name() << "]";
   }
   if (node.begin != nullptr && node.end != nullptr) {
@@ -1238,23 +1014,6 @@ bool WikiParser::Matches(const char *prefix) {
 
 void WikiParser::SkipWhitespace() {
   while (*ptr_ == ' ') ptr_++;
-}
-
-void WikiParser::Append(const char *begin, const char *end) {
-  for (const char *p = begin; p < end; ++p) {
-    if (*p == '\n') {
-      if (!output_->empty()) line_breaks_++;
-    } else if (*p != ' ' || line_breaks_ == 0) {
-      if (line_breaks_ > 1) {
-        output_->append("\n<p>");
-        line_breaks_ = 0;
-      } else if (line_breaks_ > 0) {
-        output_->push_back('\n');
-        line_breaks_ = 0;
-      }
-      output_->push_back(*p);
-    }
-  }
 }
 
 void WikiParser::Node::CheckSpecialLink() {

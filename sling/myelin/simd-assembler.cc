@@ -19,12 +19,15 @@ namespace myelin {
 
 using namespace jit;
 
+bool SIMDGenerator::SupportsUnroll() {
+  return true;
+}
+
 void SIMDGenerator::Broadcast(int dst, const Operand &src) {
   // Broadcast is just a load for scalars.
   CHECK_EQ(VectorSize(), 1);
   Load(dst, src);
 }
-
 
 void SIMDGenerator::Sum(int r) {
   // Sum is a no-op for scalars.
@@ -112,30 +115,13 @@ class AVX512FloatGenerator : public SIMDGenerator {
   }
 
   void MulAdd(int dst, int src1, const Operand &src2, bool retain) override {
-    if (masm_->Enabled(FMA3)) {
-      masm_->vfmadd231ps(zmm(dst), zmm(src1), src2);
-    } else if (retain) {
-      ZMMRegister acc = masm_->mm().allocz();
-      masm_->vmulps(acc, zmm(src1), src2);
-      masm_->vaddps(zmm(dst), zmm(dst), acc);
-      masm_->mm().release(acc);
-    } else {
-      masm_->vmulps(zmm(src1), zmm(src1), src2);
-      masm_->vaddps(zmm(dst), zmm(dst), zmm(src1));
-    }
+    masm_->vfmadd231ps(zmm(dst), zmm(src1), src2);
   }
 
   void Sum(int r) override {
     ZMMRegister sum = ZMMRegister::from_code(r);
     ZMMRegister acc = masm_->mm().allocz();
-    masm_->vshuff32x4(acc, sum, sum, 0x0E);
-    masm_->vaddps(sum, sum, acc);
-    masm_->vshuff32x4(acc, sum, sum, 0xB1);
-    masm_->vaddps(sum, sum, acc);
-    masm_->vpermilps(acc, sum, 0x0E);
-    masm_->vaddps(sum, sum, acc);
-    masm_->vpermilps(acc, sum, 0x01);
-    masm_->vaddps(sum, sum, acc);
+    masm_->Reduce(REDUCE_ADD, DT_FLOAT, sum, acc);
     masm_->mm().release(acc);
   }
 
@@ -243,10 +229,7 @@ class AVX256FloatGenerator : public SIMDGenerator {
   void Sum(int r) override {
     YMMRegister sum = YMMRegister::from_code(r);
     YMMRegister acc = masm_->mm().allocy();
-    masm_->vperm2f128(acc, sum, sum, 1);
-    masm_->vaddps(sum, sum, acc);
-    masm_->vhaddps(sum, sum, sum);
-    masm_->vhaddps(sum, sum, sum);
+    masm_->Reduce(REDUCE_ADD, DT_FLOAT, sum, acc);
     masm_->mm().release(acc);
   }
 };
@@ -314,8 +297,9 @@ class AVX128FloatGenerator : public SIMDGenerator {
 
   void Sum(int r) override {
     XMMRegister sum = XMMRegister::from_code(r);
-    masm_->vhaddps(sum, sum, sum);
-    masm_->vhaddps(sum, sum, sum);
+    XMMRegister acc = masm_->mm().allocx();
+    masm_->Reduce(REDUCE_ADD, DT_FLOAT, sum, acc);
+    masm_->mm().release(acc);
   }
 };
 
@@ -418,8 +402,9 @@ class SSE128FloatGenerator : public SIMDGenerator {
 
   void Sum(int r) override {
     XMMRegister sum = XMMRegister::from_code(r);
-    masm_->haddps(sum, sum);
-    masm_->haddps(sum, sum);
+    XMMRegister acc = masm_->mm().allocx();
+    masm_->Reduce(REDUCE_ADD, DT_FLOAT, sum, acc);
+    masm_->mm().release(acc);
   }
 };
 
@@ -628,28 +613,13 @@ class AVX512DoubleGenerator : public SIMDGenerator {
   }
 
   void MulAdd(int dst, int src1, const Operand &src2, bool retain) override {
-    if (masm_->Enabled(FMA3)) {
-      masm_->vfmadd231pd(zmm(dst), zmm(src1), src2);
-    } else if (retain) {
-      ZMMRegister acc = masm_->mm().allocz();
-      masm_->vmulpd(acc, zmm(src1), src2);
-      masm_->vaddpd(zmm(dst), zmm(dst), acc);
-      masm_->mm().release(acc);
-    } else {
-      masm_->vmulpd(zmm(src1), zmm(src1), src2);
-      masm_->vaddpd(zmm(dst), zmm(dst), zmm(src1));
-    }
+    masm_->vfmadd231pd(zmm(dst), zmm(src1), src2);
   }
 
   void Sum(int r) override {
     ZMMRegister sum = ZMMRegister::from_code(r);
     ZMMRegister acc = masm_->mm().allocz();
-    masm_->vshuff32x4(acc, sum, sum, 0x0E);
-    masm_->vaddpd(sum, sum, acc);
-    masm_->vshuff32x4(acc, sum, sum, 0xB1);
-    masm_->vaddpd(sum, sum, acc);
-    masm_->vpermilpd(acc, sum, 0x0E);
-    masm_->vaddpd(sum, sum, acc);
+    masm_->Reduce(REDUCE_ADD, DT_DOUBLE, sum, acc);
     masm_->mm().release(acc);
   }
 
@@ -757,9 +727,7 @@ class AVX256DoubleGenerator : public SIMDGenerator {
   void Sum(int r) override {
     YMMRegister sum = YMMRegister::from_code(r);
     YMMRegister acc = masm_->mm().allocy();
-    masm_->vperm2f128(acc, sum, sum, 1);
-    masm_->vaddpd(sum, sum, acc);
-    masm_->vhaddpd(sum, sum, sum);
+    masm_->Reduce(REDUCE_ADD, DT_DOUBLE, sum, acc);
     masm_->mm().release(acc);
   }
 };
@@ -828,7 +796,9 @@ class AVX128DoubleGenerator : public SIMDGenerator {
 
   void Sum(int r) override {
     XMMRegister sum = XMMRegister::from_code(r);
-    masm_->vhaddpd(sum, sum, sum);
+    XMMRegister acc = masm_->mm().allocx();
+    masm_->Reduce(REDUCE_ADD, DT_DOUBLE, sum, acc);
+    masm_->mm().release(acc);
   }
 };
 
@@ -932,9 +902,8 @@ class SSE128DoubleGenerator : public SIMDGenerator {
   void Sum(int r) override {
     XMMRegister sum = XMMRegister::from_code(r);
     XMMRegister acc = masm_->mm().allocx();
-    masm_->movapd(acc, sum);
-    masm_->shufpd(acc, sum, 1);
-    masm_->addsd(sum, acc);
+    masm_->Reduce(REDUCE_ADD, DT_DOUBLE, sum, acc);
+    masm_->mm().release(acc);
   }
 };
 
@@ -1090,15 +1059,109 @@ class SSEScalarDoubleGenerator : public SIMDGenerator {
   }
 };
 
+// Scalar integer SIMD generator using regular registers.
+class ScalarIntSIMDGenerator : public SIMDGenerator {
+ public:
+  ScalarIntSIMDGenerator(MacroAssembler *masm, Type type)
+      : SIMDGenerator(masm, false), type_(type) {}
+
+  // Uses regular registers.
+  int VectorBytes() override { return TypeTraits::of(type_).size(); }
+  int VectorSize() override { return 1; }
+  int Alloc() override { return masm_->rr().alloc().code(); }
+  bool SupportsUnroll() override { return false; }
+
+  void Load(int dst, const Operand &src) override {
+    switch (type_) {
+      case DT_INT8: masm_->movsxbq(reg(dst), src); break;
+      case DT_INT16: masm_->movsxwq(reg(dst), src); break;
+      case DT_INT32: masm_->movsxlq(reg(dst), src); break;
+      case DT_INT64: masm_->movq(reg(dst), src); break;
+      default: LOG(FATAL) << "Unsupported integer type: " << type_;
+    }
+  }
+
+  void Store(const Operand &dst, int src) override {
+    switch (type_) {
+      case DT_INT8: masm_->movb(dst, reg(src)); break;
+      case DT_INT16: masm_->movw(dst, reg(src)); break;
+      case DT_INT32: masm_->movl(dst, reg(src)); break;
+      case DT_INT64: masm_->movq(dst, reg(src)); break;
+      default: LOG(FATAL) << "Unsupported integer type: " << type_;
+    }
+  }
+
+  void Zero(int r) override {
+    masm_->xorq(reg(r), reg(r));
+  }
+
+  void Add(int dst, int src1, int src2) override {
+    if (dst == src1) {
+      masm_->addq(reg(dst), reg(src2));
+    } else if (dst == src2) {
+      masm_->addq(reg(dst), reg(src1));
+    } else {
+      masm_->movq(reg(dst), reg(src1));
+      masm_->addq(reg(dst), reg(src2));
+    }
+  }
+
+  void Add(int dst, int src1, const jit::Operand &src2) override {
+    if (dst == src1 && type_ == DT_INT64) {
+      masm_->addq(reg(dst), src2);
+    } else {
+      Load(dst, src2);
+      masm_->addq(reg(dst), reg(src1));
+    }
+  }
+
+  void Mul(int dst, int src1, const jit::Operand &src2) override {
+    if (dst == src1 && type_ == DT_INT64) {
+      masm_->imulq(reg(dst), src2);
+    } else {
+      Load(dst, src2);
+      masm_->imulq(reg(dst), reg(src1));
+    }
+  }
+
+  void MulAdd(int dst, int src1, const Operand &src2, bool retain) override {
+    if (!retain && type_ == DT_INT64) {
+      masm_->imulq(reg(src1), src2);
+      masm_->addq(reg(dst), reg(src1));
+    } else {
+      Register acc = masm_->rr().alloc();
+      Load(acc.code(), src2);
+      masm_->imulq(acc, reg(src1));
+      masm_->addq(reg(dst), acc);
+      masm_->rr().release(acc);
+    }
+  }
+
+ public:
+  Type type_;
+};
+
 bool SIMDAssembler::Supports(Type type) {
-  // Only floats and doubles are currently supported.
-  return type == DT_FLOAT || type == DT_DOUBLE;
+  return type == DT_FLOAT || type == DT_DOUBLE ||
+         type == DT_INT8 || type == DT_INT16 ||
+         type == DT_INT32 || type == DT_INT64;
+}
+
+int SIMDAssembler::RegisterUsage(Type type) {
+  if (type == DT_INT8 || type == DT_INT16 ||
+      type == DT_INT32 || type == DT_INT64) {
+    return 1;
+  } else {
+    return 0;
+  }
 }
 
 int SIMDAssembler::VectorBytes(Type type) {
-  if (CPU::Enabled(AVX512F)) return 64;
-  if (CPU::Enabled(AVX)) return 32;
-  if (CPU::Enabled(SSE)) return 16;
+  if (type == DT_FLOAT || type == DT_DOUBLE) {
+    if (CPU::Enabled(AVX512F)) return 64;
+    if (CPU::Enabled(AVX)) return 32;
+    if (CPU::Enabled(SSE)) return 16;
+  }
   return TypeTraits::of(type).size();
 }
 
@@ -1138,6 +1201,26 @@ SIMDAssembler::SIMDAssembler(MacroAssembler *masm, Type type, bool aligned) {
       }
       break;
 
+    case DT_INT8:
+      name_ = "Int8";
+      add(new ScalarIntSIMDGenerator(masm, DT_INT8));
+      break;
+
+    case DT_INT16:
+      name_ = "Int16";
+      add(new ScalarIntSIMDGenerator(masm, DT_INT16));
+      break;
+
+    case DT_INT32:
+      name_ = "Int32";
+      add(new ScalarIntSIMDGenerator(masm, DT_INT32));
+      break;
+
+    case DT_INT64:
+      name_ = "Int64";
+      add(new ScalarIntSIMDGenerator(masm, DT_INT64));
+      break;
+
     default:
       LOG(FATAL) << "Unsuported type";
   }
@@ -1159,10 +1242,17 @@ void SIMDAssembler::Sum(const std::vector<int> &regs) {
   }
 }
 
-SIMDStrategy::SIMDStrategy(SIMDAssembler *sasm, int size, int max_unrolls) {
+SIMDStrategy::SIMDStrategy(SIMDAssembler *sasm, int size) {
+  // Use scalar generator for singletons.
+  if (size == 1) {
+    phases_.emplace_back(sasm->scalar());
+    return;
+  }
+
   // Add bulk phase.
   int vecsize = sasm->main()->VectorSize();
   int main = (size / vecsize) * vecsize;
+  int max_unrolls = sasm->main()->SupportsUnroll() ? kMaxUnrolls : 1;
   int unrolls = std::min(main / vecsize, max_unrolls);
   int remaining = size;
   int offset = 0;

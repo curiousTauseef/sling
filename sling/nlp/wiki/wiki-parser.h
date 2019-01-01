@@ -75,7 +75,7 @@ class WikiParser {
 
     Text text() const { return Text(begin, end - begin); }
     Text name() const { return Text(name_begin, name_end - name_begin); }
-    bool anchored() const { return text_begin != text_end; }
+    bool named() const { return name_begin != nullptr && name_end != nullptr; }
 
     void CheckSpecialLink();
 
@@ -96,10 +96,6 @@ class WikiParser {
     // Name part of text span covered by the AST node.
     const char *name_begin = nullptr;
     const char *name_end = nullptr;
-
-    // Text span of AST node in the output text.
-    int text_begin = -1;
-    int text_end = -1;
   };
 
   // Initialize parser with wiki text.
@@ -108,28 +104,8 @@ class WikiParser {
   // Parse wiki text.
   void Parse();
 
-  // Extract plain text and information from AST.
-  void Extract() { Extract(0); }
-
-  // Extract text from node into string buffer.
-  void ExtractToString(int index, string *text);
-
-  // Extract simple text from node and its children.
-  void ExtractSimpleText(const Node &node, string *text);
-
-  // Get intro text of article, i.e. the opening phrase in bold/italic.
-  // Returns true if intro text is found, and begin and end is set to the
-  // text span in the extracted text.
-  bool GetIntro(int *begin, int *end);
-
   // Print AST node and its children.
   void PrintAST(int index, int indent);
-
-  // Return extracted text.
-  const string &text() const { return text_; }
-
-  // Return the number of AST nodes.
-  int num_ast_nodes() const { return nodes_.size(); }
 
   // Return nodes.
   const std::vector<Node> &nodes() const { return nodes_; }
@@ -162,8 +138,11 @@ class WikiParser {
   // Parse link end.
   void ParseLinkEnd();
 
-  // Parse url.
-  void ParseUrl();
+  // Parse url start.
+  void ParseUrlBegin();
+
+  // Parse url end.
+  void ParseUrlEnd();
 
   // Parse tag (<...>) or comment (<!-- ... -->).
   void ParseTag();
@@ -210,36 +189,6 @@ class WikiParser {
   // Parse HTML/XML attribute list. Return true if any attributes found.
   bool ParseAttributes(const char *delimiters);
 
-  // Extract text from AST node.
-  void Extract(int index);
-
-  // Extract link.
-  void ExtractLink(int index);
-
-  // Extract URL.
-  void ExtractUrl(int index);
-
-  // Extract tag.
-  void ExtractTag(int index);
-
-  // Extract heading.
-  void ExtractHeading(int index);
-
-  // Extract font.
-  void ExtractFont(int index);
-
-  // Extract list item.
-  void ExtractListItem(int index);
-
-  // Extract table.
-  void ExtractTable(int index);
-
-  // Extract table  row.
-  void ExtractTableRow(int index);
-
-  // Extract text from AST node children.
-  void ExtractChildren(int index);
-
   // Add child node to current AST node.
   int Add(Type type, int param = 0);
 
@@ -268,12 +217,6 @@ class WikiParser {
   // Skip whitespace.
   void SkipWhitespace();
 
-  // Append text to text buffer.
-  void Append(const char *begin, const char *end);
-  void Append(const char *str) { Append(str, str + strlen(str)); }
-  void Append(Text str) { Append(str.data(), str.data() +str.size()); }
-  void Append(const Node &node) { Append(node.begin, node.end); }
-
   // Check if a character is an XML name character.
   static bool IsNameChar(int c) {
     return ascii_isalnum(c) || c == ':' || c == '-' || c == '_' || c == '.';
@@ -291,18 +234,6 @@ class WikiParser {
   // Current nesting of AST nodes. The stack contains indices into the AST
   // node array.
   std::vector<int> stack_;
-
-  // Extracted text.
-  string text_;
-
-  // String for text output.
-  string *output_ = &text_;
-
-  // Number of pending line breaks.
-  int line_breaks_ = 0;
-
-  // Current font.
-  int font_ = 0;
 
  public:
   // Special template types.
@@ -387,14 +318,22 @@ class WikiParser {
     TMPL_SUBST,
 
     TMPL_EXPR,
+    TMPL_IF,
     TMPL_IFEXPR,
+    TMPL_IFEXIST,
     TMPL_IFEQ,
     TMPL_TAG,
     TMPL_RELATED,
     TMPL_TIME,
     TMPL_INVOKE,
     TMPL_SECTION,
+    TMPL_SECTIONH,
     TMPL_PROPERTY,
+    TMPL_DATEFORMAT,
+    TMPL_FORMATDATE,
+    TMPL_LIST,
+    TMPL_STATEMENTS,
+    TMPL_SWITCH,
   };
 };
 

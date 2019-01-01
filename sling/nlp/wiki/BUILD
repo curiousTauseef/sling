@@ -60,6 +60,37 @@ cc_library(
 )
 
 cc_library(
+  name = "wiki-annotator",
+  srcs = ["wiki-annotator.cc"],
+  hdrs = ["wiki-annotator.h"],
+  deps = [
+    ":wiki-extractor",
+    "//sling/base:registry",
+    "//sling/frame:object",
+    "//sling/nlp/document",
+    "//sling/string:numbers",
+    "//sling/string:strcat",
+    "//sling/string:text",
+  ],
+)
+
+cc_library(
+  name = "wiki-macros",
+  srcs = ["wiki-macros.cc"],
+  deps = [
+    ":wiki-annotator",
+    "//sling/nlp/document",
+    "//sling/nlp/document:fingerprinter",
+    "//sling/nlp/document:lex",
+    "//sling/nlp/document:document-tokenizer",
+    "//sling/nlp/kb:calendar",
+    "//sling/string:numbers",
+    "//sling/util:mutex",
+  ],
+  alwayslink = 1,
+)
+
+cc_library(
   name = "wikidata-importer",
   srcs = ["wikidata-importer.cc"],
   deps = [
@@ -100,6 +131,9 @@ cc_library(
   name = "wikipedia-documents",
   srcs = ["wikipedia-documents.cc"],
   deps = [
+    ":wiki-annotator",
+    ":wiki-extractor",
+    ":wiki-macros",
     ":wiki-parser",
     ":wikipedia-map",
     "//sling/base",
@@ -193,11 +227,18 @@ cc_binary(
   name = "parse-wiki-text",
   srcs = ["parse-wiki-text.cc"],
   deps = [
-    ":wiki-parser",
+    ":wiki",
+    ":wiki-annotator",
     ":wiki-extractor",
+    ":wiki-macros",
+    ":wiki-parser",
+    ":wikipedia-map",
     "//sling/base",
     "//sling/file",
     "//sling/file:posix",
+    "//sling/frame",
+    "//sling/nlp/document",
+    "//sling/nlp/document:document-tokenizer",
     "//sling/string",
   ],
 )

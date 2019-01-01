@@ -61,3 +61,15 @@ cc_binary(
   ],
 )
 
+cc_binary(
+  name = "templgen",
+  srcs = ["templgen.cc"],
+  deps = [
+    "//sling/base",
+    "//sling/file",
+    "//sling/file:posix",
+    "//sling/nlp/wiki:wiki-parser",
+    "//sling/util:unicode",
+  ],
+)
+
